@@ -1,0 +1,325 @@
+---
+title: "Patient_Data_Analysis"
+author: "Ons Hosni"
+date: "17/05/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+## Load libraries : 
+
+```{r message=FALSE, warning=FALSE}
+library("tidyverse")
+library("leaflet")
+library("leaflet.extras")
+library("ggpubr")
+library("broom")
+library("purrr")
+library("rpart")
+library("rpart.plot")
+library("factoextra")
+library("caret")
+library("gridExtra")
+```
+
+## Load dataset Patient : 
+
+```{r message=FALSE, warning=FALSE}
+df_patient <- read_csv(file = "data/patient.csv") #patient data from the first 2 months of the outbreak 
+#View(df_patient)
+#summary(df_patient)
+#colnames(df_patient)
+str(df_patient)
+
+```
+
+## Basic descriptive and visualization: Patient data :
+
+```{r}
+# Plot 1: Distribution of age group by gender 
+df_patient %>%
+  group_by(age_group, gender) %>%
+  tally() %>%
+  collect() %>%
+  drop_na(gender, age_group) %>%
+  arrange(desc(age_group)) %>%
+  ggplot() +
+  geom_col(aes(x = age_group, y = n, fill = gender)) +
+  labs(title = "Distribution of age group by gender",
+       subtitle= "COVID-19 affected", x = "Age group", y = "Count")
+```
+
+```{r}
+# Plot 2: Smoothing of time_2_admin ~ age, grouped by gender and dead 
+df_patient %>%
+  mutate(time2admis = as.integer(date_admission_hospital - date_onset)) %>%
+  select(gender, age, time2admis, is_dead, contact_with_Wuhan) %>%
+  drop_na() %>%
+  ggplot() +
+  geom_point(aes(age, time2admis, color=gender)) +
+  geom_smooth(aes(age, time2admis)) +
+  facet_grid(contact_with_Wuhan~.,
+             labeller = label_both, scales = "free") +
+  ylim(0,30) +
+  labs(title = "From onset to hospital admission",
+       subtitle= "COVID-19 affected", x = "Age",
+       y = "Day(s)") 
+```
+
+```{r}
+# Plot 3: Barplot of the symptoms (when counts > 10 for visual purposes) 
+df_patient %>%
+  select(chills:thirst) %>%
+  summarise_if(is.numeric,sum,na.rm=TRUE) %>%
+  gather(symptoms,counts,chills:thirst) %>%
+  filter(counts > 10) %>%
+  ggplot(aes(reorder(symptoms,counts),counts,fill = symptoms)) +
+  geom_bar(stat="identity") +
+  coord_flip() +
+  theme(legend.position = "none") + ylim(0,650) +
+  labs(title = "Prevalence of symptoms",
+       subtitle= "Observed in more than 10 cases",
+       x = "Symptoms", y = "Count")
+# fever, cough and sore throat are the most frequent symptoms observed among the patients
+```
+
+```{r, fig.height=8, fig.width=8}
+# Plot 4: Correlation heatmap of categorical symptoms 
+corr_matrix_df <-
+  df_patient %>%
+
+  # We select only the categorical symptom columns
+  select(chills:discharge) %>%
+
+  # Calculate the correlation matrix
+  cor() %>%
+
+  # Transform the results into a tibble with the row names as an "id" column
+  as_tibble(rownames = "symptom1") %>%
+
+  # Tidy the data by having all correlation values
+  # between two symptoms in the 'value' column
+  pivot_longer(cols = -symptom1, names_to = 'symptom2') %>%
+
+  # Round correlation coefficient values to 2 decimals
+  mutate(value = round(value, digits = 1))
+
+p_corr_heatmap <-
+  ggplot(data = corr_matrix_df,
+         mapping = aes(x = symptom1, y = symptom2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white",
+                       midpoint = 0, limit = c(-1,1),
+                       name = "Pearson\nCorrelation") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  coord_fixed() +
+  geom_text(aes(symptom2, symptom1, label = value), color = "black", size = 2) +
+  labs(title = "Correlation heatmap of symptoms set",
+       x = "Symptom 1", y = "Symptom 2")
+
+p_corr_heatmap
+# Cough and fever have the highest correlation ~0.5
+```
+
+```{r, fig.height=7, fig.width=16}
+# Plot 5: Facet plot of the symptom comorbidity :
+corr_matrix_df %>%
+  filter(symptom1 != symptom2) %>%
+  filter(value > 0.1) %>%
+  arrange(symptom1, desc(value)) %>%
+  group_by(symptom1) %>%
+  ggplot(aes(y = fct_rev(symptom2), x = value)) +
+    geom_bar(aes(fill = value), stat = 'identity') +
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white",
+                         name = 'Correlation\ncoefficient') +
+    facet_wrap(~symptom1, ncol = 11) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+    labs(title = "Facet plot of the symptom comorbidity (where r > 0.1)",
+         x = "Correlation coefficient between the two symptoms (r)",
+         y = "Symptom")
+# When having fever, the patiens were also likely to have cough, dyspnea, fatigue, malaise and sore throat
+```
+
+
+## Model data: Patient data
+
+* Part 1 : PCA 
+
+```{r}
+#subsetting data frame for the pca (only biological features)
+#Biological features: symptoms, age, gender, contact with wuhan
+df_patient_pca<- df_patient %>%
+  select(gender,age, contact_with_Wuhan:is_recovered,chills:thirst) %>%
+  na.omit() %>%
+  mutate(gender = case_when(gender == 'female' ~ 1,
+                            gender == 'male' ~ 0)) %>%
+  select_if(~length(unique(.)) > 1) # removing columns with same value
+```
+
+```{r}
+# Making PCA of the subset - Selecting only the binary variables to avoid scale
+df_patient_pca %>%
+  select(-age) %>%
+  prcomp(center = TRUE) %>%
+  fviz_eig(main = "PCA of biological features",
+           subtitle = "Explained variance in percentage by dimension",
+           xlab = "Dimension", ylab = "Percentage",addlabels = TRUE)
+
+#Du graphique ci-dessus, nous pourrions vouloir nous arrêter à la troisième composante principale. environ 60% des informations (variances) contenues dans les données sont conservées par les cinq premières composantes principales.
+```
+
+* Part 2 : Logistic Regression 
+
+```{r}
+#Performing logistic regression
+df_patient_glm<- df_patient %>%
+  select(country:age,contact_with_Wuhan:is_recovered,
+         chills:thirst) %>%
+  na.omit() %>%
+  select_if(~length(unique(.)) > 1) %>% # removing zeros
+  mutate_if(is.character,as.factor) %>%
+  mutate_if(is.numeric,as.factor) %>%
+  mutate(age = as.integer(age))
+
+str(df_patient_glm)
+
+```
+
+```{r}
+# making model prediction for being dead
+# Make logistic regression model 
+df_patient_glm_model <- glm(is_dead~.,
+                            family = binomial,
+                            data = df_patient_glm)
+summary(df_patient_glm_model)
+```
+
+```{r}
+# selecting significant variables
+df_patient_glm_is_dead<- df_patient_glm %>%
+  select(is_dead, gender, age, contact_with_Wuhan, fever)
+str(df_patient_glm_is_dead)
+```
+
+```{r}
+# Put the significant variables into new revised model 
+
+patient_death_model_revised <- glm(is_dead ~ gender + age + contact_with_Wuhan + fever,
+                                    family = binomial(link = "logit"),
+                                    data = df_patient_glm)
+summary(patient_death_model_revised)
+```
+
+```{r}
+# showing the summary (estimate + std.error)
+
+df_patient_glm_is_dead %>%
+  glm(is_dead ~ ., ., family = binomial()) %>%
+  tidy() %>%
+  mutate(low = estimate - std.error,
+         high = estimate + std.error) %>%
+  ggplot(aes(estimate, term, xmin = low, xmax = high, height = 0)) +
+  geom_point() +
+  geom_vline(xintercept = 0) +
+  geom_errorbarh() +
+  labs(title = "Model evaluation of logsitic regression",
+       subtitle= "COVID-19 affected",
+       x = "Estimated coefficient", y = "Parameters")
+```
+
+
+* Part 3 : Decision Tree
+
+```{r}
+# Creating data frame for decision tree
+df_patient_dec <-
+  df_patient %>%
+  select(gender, age, contact_with_Wuhan:is_recovered,
+         chills:thirst) %>%
+  select_if(~length(unique(.)) > 1) %>%
+  mutate(status = case_when(is_dead == 0 & is_recovered == 0 ~ "still_sick",
+                            is_dead == 0 & is_recovered == 1 ~ "recovered",
+                            is_dead == 1 & is_recovered == 0 ~ "dead",
+                            is_dead == 1 & is_recovered == 1 ~ "dead")) %>%
+  mutate(gender = case_when(gender == "female" ~ 1,
+                            gender == "male" ~ 0)) %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate_if(is.numeric, as.factor) %>%
+  mutate(age = as.integer(age)) %>%
+  select(-is_dead, -is_recovered) %>%
+  mutate(patient_id = as.character(1:nrow(df_patient))) %>%
+  drop_na(status)
+```
+
+
+```{r, fig.height=7, fig.width=16}
+set.seed(22100)
+
+# Making train and test for decision tree
+df_patient_dec_train <-
+  df_patient_dec %>%
+  sample_frac(0.8)
+
+df_patient_dec_test <-
+  df_patient_dec %>%
+  anti_join(df_patient_dec_train, by = "patient_id")
+
+
+# Fitting the training data
+df_patient_dec_fit <-
+  df_patient_dec_train %>%
+  select(-patient_id) %>%
+  rpart(status ~ ., ., method = 'class', model = TRUE,
+        minsplit = 1, minbucket = 2, cp = 0.004)
+
+
+# Plotting the tree 
+
+rpart.plot(df_patient_dec_fit, roundint = TRUE, extra = 108)
+
+#- Training and test set (80/20), plot performed on the training set
+#-  If you have been in contact with Wuhan and your age is equal to or above 73 years old, the probability of being dead is 92%
+
+```
+```{r}
+# Predicting with the model
+df_patient_pred_status <-
+  predict(df_patient_dec_fit, df_patient_dec_test,
+          type = 'class')
+
+
+# Defining the true class and predicted class
+true_class <-
+  df_patient_dec_test %>%
+  select(status) %>%
+  as_vector()
+
+pred_class <-
+  as_vector(df_patient_pred_status)
+```
+
+```{r}
+# Creating confusion matrix
+table_cm <-
+  as.matrix(confusionMatrix(table(true_class, pred_class))) #matrice de confusion de la classification réelle et la classification par prédiction
+
+table_cm_plot <-
+  grid.arrange(top="Confusion Matrix: Decision tree prediction",
+               tableGrob(table_cm))
+
+```
+
+```{r}
+# Calculating accuracy
+dec_tree_model_acc <- round(sum(diag(table_cm)) / sum(table_cm),3)
+dec_tree_model_acc
+#- Rows are the true classes and the columns are the predicted classes
+#- Accuracy = 97.6%
+#- Decision tree is suitable and interpretable for predicting patient progression
+```
+
