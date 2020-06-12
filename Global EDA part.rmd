@@ -1,0 +1,423 @@
+---
+title: "Finale_Sample_Covid"
+author: "Ons Hosni-Amine Marouen-Touati Rayen - Joudi Omar -Mouhli Aziz"
+date: "29/04/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+## Importing Librairies : 
+
+
+```{r }
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(shinythemes)
+library(magrittr)
+library(ggpubr)
+library(leaflet)
+library(FactoMineR)
+library(devtools)
+library(ggplot2)
+library(factoextra)
+library(NbClust)
+```
+
+
+# Import Data : 
+
+* Covid-19 Cases (confirmed-deaths-recovered) :
+
+```{r pressure}
+## Covid-19 Cases data: Updates every night 
+url1<-"https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_confirmed_global.csv&filename=time_series_covid19_confirmed_global.csv"
+conf<-read.csv(url1, stringsAsFactors =F) #Confirmed Cases
+
+url2<-"https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_deaths_global.csv&filename=time_series_covid19_deaths_global.csv"
+death<-read.csv(url2, stringsAsFactors =F) #Death Cases
+
+url3<-"https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_recovered_global.csv&filename=time_series_covid19_recovered_global.csv"
+rec<-read.csv(url3, stringsAsFactors =F) #Recovered Cases 
+
+```
+
+* Population dataset for different countries : 
+
+```{r}
+
+population<-read.csv("data/pop.csv",stringsAsFactors =F) 
+
+```
+
+* Age dataset (65 and above) :
+
+```{r}
+## Age data (65 and above)
+Age<-read.csv("data/age.csv",sep=",",header=FALSE, stringsAsFactors =F) 
+##elimination des 3 premiers lignes et on prend seulement le country et le pourcentage >=65ans en 2018
+Age<-Age %>%
+  select(V1,V63)
+Age<-Age[-1:-3,]
+colnames(Age)<-c("country","pop_percent")
+
+```
+
+## Data Cleaning : 
+
+```{r}
+#rename columns 
+#on change le format date pour les data "confirmed / death / recovered" et on change le nom des colonnes.
+colnames(conf)<-as.Date(gsub("X","",colnames(conf)),"%m.%d.%y") #Confirmed
+colnames(conf)[1:4]<-c("Region","country","lat","lon")
+
+
+
+colnames(death)<-as.Date(gsub("X","",colnames(death)),"%m.%d.%y") #Deaths
+colnames(death)[1:4]<-c("Region","country","lat","lon")
+
+colnames(rec)<-as.Date(gsub("X","",colnames(rec)),"%m.%d.%y") #Recovered
+colnames(rec)[1:4]<-c("Region","country","lat","lon")
+```
+
+## Data Visualization for shinyapp : 
+*** The output of the graphs will be in the shinyApp
+
+1. Country_level graph of total cases :
+```{r}
+
+graph1<- function (Countryname){
+  
+Country<-as.character(Countryname)
+
+a<-conf%>%
+  filter(country==Country)%>%
+  summarise_if(is.numeric, funs(sum))
+a<-a[,-1:-2]
+
+b<-death%>%
+  filter(country==Country)%>%
+  summarise_if(is.numeric, funs(sum))
+b<-b[,-1:-2]
+
+c<-rec%>%
+  filter(country==Country)%>%
+  summarise_if(is.numeric, funs(sum))
+c<-c[,-1:-2]
+
+g<-rbind("date"=colnames(a),"confirmed"=a,"death"=b,"recovered"=c)
+
+gg<-as.data.frame(t(g))
+gg$date<-as.Date(as.character(gg$date))
+gg$confirmed<-as.numeric(as.character(gg$confirmed))
+gg$death<-as.numeric(as.character(gg$death))
+gg$recovered<-as.numeric(as.character(gg$recovered))
+
+ggplot(gg,aes(x=date))+
+  geom_line(aes(y=confirmed, col="confrimed"))+
+  geom_line(aes(y=death, col="death"))+
+  geom_line(aes(y=recovered, col="recovered"))+
+  scale_x_date(breaks = function(x) seq.Date(from = min(x), 
+                                             to = max(x), 
+                                             by = "20 days"))+
+  labs(x="Date",y="Total number of cases",
+       title=paste("Graph of Covid-19 numbers in ",Country))
+
+}
+
+
+
+
+
+
+```
+
+2. Country_level graph of only active cases :
+
+```{r}
+
+graph4<- function (Countryname){
+
+Country<-as.character(Countryname) 
+
+a<-conf%>%
+    filter(country==Country)%>%
+    summarise_if(is.numeric, funs(sum))
+  a<-a[,-1:-2]
+  
+  b<-death%>%
+    filter(country==Country)%>%
+    summarise_if(is.numeric, funs(sum))
+  b<-b[,-1:-2]
+  
+  c<-rec%>%
+    filter(country==Country)%>%
+    summarise_if(is.numeric, funs(sum))
+  c<-c[,-1:-2]
+  
+  g<-rbind("date"=colnames(a),"confirmed"=a,"death"=b,"recovered"=c)
+  
+  gg<-as.data.frame(t(g))
+  gg$date<-as.Date(as.character(gg$date))
+  gg$confirmed<-as.numeric(as.character(gg$confirmed))
+  gg$death<-as.numeric(as.character(gg$death))
+  gg$recovered<-as.numeric(as.character(gg$recovered))
+  
+  gg<-gg%>%
+    mutate("Active"=confirmed-death-recovered)
+  
+ggplot(gg,aes(x=date, y=Active))+
+    geom_line(color='green', size=1)+
+    scale_x_date(breaks = function(x) seq.Date(from = min(x), 
+                                               to = max(x), 
+                                               by = "20 days"))+
+    labs(x="Date",y="Total number of Active cases",
+         title=paste("Graph of Covid-19 Active cases in ",Country))
+}
+
+```
+
+3. Global map data : 
+
+```{r}
+
+#on choisit les 4 premiers colonnes de la data conf (region/country/lat/lon)
+map<-conf[,1:4]
+View(map)
+#on ajoute une fonction qui ajoute le nombre total confirmed ,death et size au map pour chaque country
+map<-map %>%
+  mutate("confirmed"=conf[,ncol(conf)]) %>%
+  mutate("death"=death[,ncol(death)]) %>%
+  mutate("size"=log(confirmed)) %>%
+  na.omit() %>%
+  filter(size>0)
+
+View(map)
+
+
+map1<- leaflet() %>% 
+  addProviderTiles("CartoDB") %>% 
+  addCircleMarkers(data =map, radius = ~size,color = "Red", 
+  label= ~ paste0(country ," ",Region ,
+                  " Confirmed Cases= ",confirmed," Death=", death))
+map1
+```
+
+
+## Preparation of the dataset :
+
+### Data Manipulation for Clustering :
+
+
+```{r}
+
+# n prend comme variable region ,country et la derniere date
+n<-conf[-3:-(ncol(conf)-1)] 
+colnames(n)[3]<-"confirmed"
+
+#on ajoute la variable death
+n$death<-death[,ncol(death)]
+#on fait group by pour regrouper les repetitions
+n_data<-n %>%
+       group_by(country) %>%
+       summarise(conf=sum(confirmed),death=sum(death))
+
+## new data adding for analysis
+
+#on prend les informations de 2019
+population<-population %>%
+  filter(Time==2019)
+#on va etudier les variables popmale, popfemale et poptotal
+pop<-population[,7:9]
+#pour qu'on puisse concatiner n_data et pop il faut avoir une variable similaire location et country donc il faut ajuster
+pop$country<-population$Location
+for (i in 1:nrow(pop)){
+  if(pop[i,4]=="Iran (Islamic Republic of)"){
+    pop[i,4]="Iran"
+  
+  }
+  else if(pop[i,4]=="United States of America"){
+    pop[i,4]="US"
+  }        
+
+}
+#la concaténation
+### final clustering data
+cl_data<-left_join(n_data,pop, by='country') %>% na.omit()
+str(cl_data)
+```
+
+
+
+
+```{r}
+#Pour centrer et reduire la data il faut enlever la variable qualitative country
+scaled<-scale(cl_data[-1])
+```
+
+
+## Optimal number of clusters : 
+
+```{r}
+nc2 <- NbClust(scaled, min.nc=2, max.nc= 10, method="ward.D")
+
+barplot(table(nc2$Best.n[1,]), xlab="Number of clusters")
+## on constate a partir de method ward qu'on a 3 classes
+```
+
+```{r, fig.height=7, fig.width=16}
+d=dist(scaled, method="euclidian") 
+hc1= hclust(d, method="ward.D")
+hc1
+plot(hc1, hang=-1, labels=cl_data$country)
+hc1$height
+#Selon cette représentation, la classification peut être faire en 2 ou 3 
+```
+
+```{r}
+#Visualisation de l'effet coude 
+inertie= sort(hc1$height, decreasing = TRUE)
+plot(inertie[1:10], type="b", xlab="nombre de classes",ylab="inertie")
+
+#Le CAH suggère 3 classes 
+
+```
+
+```{r}
+
+fviz_nbclust(scaled, hcut, method = "silhouette", k.max = 10) + theme_minimal() + ggtitle("The Silhouette Plot for CAH")
+fviz_nbclust(scaled, kmeans, method = "silhouette", k.max = 10) + theme_minimal() + ggtitle("The Silhouette Plot for kmeans")
+#la methode hierarchique donne 3 classes or que kmeans donne 2 classes
+#Nous allons maintenant appliquer trois méthodes de classification ensemble: hierarchique CAH, kmeans et diana. 
+#Calculer pour chaque classification les indices de validités et essayer de retrouver le nombre 
+# de classes optimales 
+
+
+# Utiliser le package clValid pour déterminer la méthode de classification
+# optimal ainsi que le nb de classes
+library(clValid)
+library(cluster)
+stab <- clValid(scaled, 2:6, clMethods = c("hierarchical", "kmeans", "diana"), validation = "stability")
+stab
+summary(stab)
+plot(stab)
+#indice de validation
+intern=clValid(scaled,2:6,clMethods = c("hierarchical", "kmeans", "diana"),
+               validation="internal")
+summary(intern)
+#a partir de l'indice de stabilité on choisit la methode hierarchique
+```
+
+## Kmeans Clustering : 
+
+
+```{r, fig.height=8, fig.width=16}
+
+### K means clustering: Which countries are more similar ??
+ 
+
+cl<-kmeans(scaled,3)
+cl
+cl_data$cluster<-as.factor(cl$cluster)
+
+g2<-cl_data%>%
+  arrange(desc(conf)) %>%
+  top_n(20,conf)
+
+g3<-cl_data%>%
+  arrange(desc(death)) %>%
+  top_n(20,death) 
+
+graph2<-ggplot(g2,aes(x=PopTotal,y=conf,col=cluster))+
+  geom_text(aes(label=country))+
+  scale_y_continuous(breaks = seq(from=0, to=max(g2$conf), by=50000))+
+  scale_x_continuous(breaks=seq(from=0, to=(max(g2$PopTotal)), by=500000))+
+  labs(x="Total Population", y="Confirmed Cases", 
+       title="Clustering based on Confirmed cases and population")
+graph2
+
+graph3<-ggplot(g3,aes(x=PopTotal,y=death,col=cluster))+
+  geom_text(aes(label=country))+
+  scale_y_continuous(breaks = seq(from=0, to=max(g3$death), by=5000))+
+  scale_x_continuous(breaks=seq(from=0, to=(max(g3$PopTotal)), by=500000))+
+  labs(x="Total Population", y="Death Cases", 
+       title="Clustering based on Deaths and population")
+graph3
+
+final_graph<-ggarrange(graph2,graph3, nrow=1)
+final_graph
+ 
+```
+* Présentation graphique avec une ACP : (PCA Analysis)
+```{r}
+
+##  PCA Analysis: What are the important factors in Covid19 ?
+
+dat1<-left_join(n_data,pop, by='country') %>% na.omit()
+
+for (i in 1:nrow(Age)){
+  
+  if(pop[i,4]=="Iran, Islamic Rep."){
+    pop[i,4]="Iran"
+  } 
+ 
+  else if(pop[i,4]=="United States"){
+    pop[i,4]="US"
+  }        
+  
+}
+##PCA
+dat2<-left_join(dat1,Age, by='country') %>% na.omit()
+dat2<-dat2 %>%
+  arrange(conf) %>%
+  top_n(50,conf)
+
+dd<-dat2[-1]
+
+scaled2<-scale(dd)
+
+## Performing PCA on the scaled data
+pc <- prcomp(scaled2)
+## kmeans 
+mink <- 2
+maxk <- 15
+within  <- numeric(maxk-mink)
+for (k in maxk:mink) {
+  cll <- kmeans(scaled2, k, nstart=20)
+  within[k-1]  <- cll$tot.withinss
+}
+SS <- data.frame(withinss=within, k=mink:maxk)
+
+ggplot(SS) +
+  geom_line(aes(x=k, y=withinss)) +
+  labs(x="Number of clusters", y="Total within-group SS")
+## 3 is good
+clkm<- kmeans(scaled2, 3, nstart=20)
+
+pcgraph<-as.data.frame(pc$x[,1:2])
+pcgraph$country<-dat2$country
+pcgraph$cluter<-as.factor(clkm$cluster)
+
+graph_pca<-ggplot(pcgraph) +
+  geom_text(aes(x=PC1, y=PC2, label=country, col=cluter)) +
+  annotate(geom="segment", arrow=arrow(), x=0, y=0,
+           xend=pc$rotation[,1], yend=pc$rotation[,2]) +
+  annotate(geom="text", x=pc$rotation[,1], y=pc$rotation[,2],
+           label=rownames(pc$rotation))
+
+graph_pca
+```
+
+
+
+
+
+
